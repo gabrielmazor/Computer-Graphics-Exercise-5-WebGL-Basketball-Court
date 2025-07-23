@@ -30,7 +30,7 @@ This project implements a fully interactive 3D basketball court in the browser u
 | **Collisions** | Collisions with rim, backboard and poler reflect velocity about outward normal.
 | **Energy Loss** | All reflections multiply the normal component by `(1 + RESTITUTION)` giving damped rebounds. |
 | **Shot Launch** | Player sets `shotPower`. Horizontal dir = ball - nearest hoop. Vertical component `Vy = k·shotPower`, where `k (0.6 – 1.5)` depends on distance, makes higher arcs for close shots. |
-| **Rotation** | Angle of rotation $\Delta \theta = \frac{s}{radius}$, on axis = **(horizontal velocity × up)**, applied on `rotateOnWorldAxis` so seams stay locked to words coordinate system. |
+| **Rotation** | Angle of rotation $\Delta \theta = \frac{dist}{radius}$, on axis = **(horizontal velocity × up)**, applied on `rotateOnWorldAxis` so seams stay locked to words coordinate system. |
 | **Score Detection** | Ball center must pass downward through *y = 3.0 m* while inside a 0.45 m cylinder; each make adds **+2** and re-arms when the ball rises 0.2 m above rim and `shotInProgress = true`|
 
 ## Additional Features
