@@ -7,7 +7,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 // Set background color
-scene.background = new THREE.Color(0x000000);
+scene.background = new THREE.Color(0x202020);
 
 // Add lights to the scene
 const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
@@ -21,89 +21,119 @@ scene.add(directionalLight);
 renderer.shadowMap.enabled = true;
 directionalLight.castShadow = true;
 
-function degrees_to_radians(degrees) {
-  var pi = Math.PI;
-  return degrees * (pi/180);
-}
+const sCam = directionalLight.shadow.camera;
+sCam.left   = -20;
+sCam.right  =  20;
+sCam.top    =  12;
+sCam.bottom = -12;
+sCam.updateProjectionMatrix();
+directionalLight.shadow.mapSize.set(1024, 1024);
 
 let basketball, ballVelocity;
 const clock = new THREE.Clock();
 
-// Physics & globals
+// Constants
 const GRAVITY     = -9.81;
 const RESTITUTION = 0.8;
 const FLOOR_Y     = 0.1;
 const BALL_RADIUS = 0.3;
-const DROP_HEIGHT = 5;
+const DROP_HEIGHT = 1;
 
-const MOVE_ACCEL = 5;    
-const MAX_SPEED  = 8;           
-const keys       = {}; 
+// court boundaries
+const COURT_MIN_X = -15 + BALL_RADIUS;
+const COURT_MAX_X =  15 - BALL_RADIUS;
+const COURT_MIN_Z =  -7.5 + BALL_RADIUS;
+const COURT_MAX_Z =   7.5 - BALL_RADIUS;
 
-let shotPower = 0;           
-const MAX_POWER   = 15;             
-const CHARGE_RATE = 10;       
+const MOVE_ACCEL = 5;
+const MAX_SPEED  = 8;
+const keys       = {};
+
+const MAX_POWER   = 15;
+const MIN_POWER = 0;
+const CHARGE_RATE = 10;
+let shotPower = MAX_POWER * 0.5;
 const initialBallPosition = new THREE.Vector3(0, FLOOR_Y + BALL_RADIUS + DROP_HEIGHT, 0);
 
 let homeScore = 0;
 let awayScore = 0;
-let lastBallY;                
+let shotsMade = 0;
+let shotsAttempts = 0;
+let shootingPercentage = 0;
+let lastBallY;
+let shotInProgress = false;
+let autoTarget = true;
 
-const hoopPositions = [        
+const hoopPositions = [
   { x: +14, z: 0 },
   { x: -14, z: 0 }
 ];
-const RIM_RADIUS = 0.45;            
-const DETECT_Y   = 3.05 - 0.05; 
-const hoopArmed  = [ true, true ];  
+const RIM_RADIUS = 0.45;
+const DETECT_Y   = 3.05 - 0.05;
+const hoopArmed  = [ true, true ];
+
+function flashMessage(text, color) {
+  const msg = document.createElement('div');
+  Object.assign(msg.style, {
+    position:  'absolute',
+    top:       '20%',
+    left:      '50%',
+    transform: 'translate(-50%, -50%)',
+    color,
+    fontSize:  '52px',
+    fontWeight:'bold',
+    fontFamily:'Arial, sans-serif',
+    pointerEvents:'none',
+    opacity:   '1',
+    transition:'opacity 0.8s ease',
+  });
+  msg.innerText = text;
+  document.body.appendChild(msg);
+  setTimeout(() => {
+    msg.style.opacity = '0';
+    setTimeout(() => document.body.removeChild(msg), 800);
+  }, 100);
+}
 
 // controls
 window.addEventListener('keydown', e => {
-  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) {
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight', 'KeyW', 'KeyS'].includes(e.code)) {
     keys[e.code] = true;
     e.preventDefault();
   }
 
-  if (e.code === 'Space' && !keys.Space) {
-    keys.Space = true;    
-    shotPower = 0;       
+  if (e.code === 'Space') {
+    keys.Space = true;
+    shotsAttempts++;
+    if (shotInProgress) {
+      flashMessage('MISSED SHOT', 'red');
+    }
+    shotInProgress = true;
+    shootingPercentage = (shotsMade / shotsAttempts) * 100;
+    shootBall();
     e.preventDefault();
   }
 
   if (e.code === 'KeyR') {
-    resetBall();        
+    resetBall();
     e.preventDefault();
+  }
+
+  if (e.code === 'KeyM') {
+  autoTarget = !autoTarget;
+  flashMessage(`Auto-targeting ${autoTarget ? 'enabled' : 'disabled'}`, 'yellow');
+  e.preventDefault();
   }
 });
 
 window.addEventListener('keyup', e => {
-  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) {
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight', 'KeyW', 'KeyS'].includes(e.code)) {
     keys[e.code] = false;
-    e.preventDefault();
-  }
-
-  if (e.code === 'Space' && keys.Space) {
-    keys.Space = false;
-    shootBall();      
     e.preventDefault();
   }
 });
 
-const swishSound = new Audio('src/swoosh.wav');
-window.addEventListener('keydown', unlockAudio, { once: true });
-window.addEventListener('mousedown', unlockAudio, { once: true });
-
-function unlockAudio() {
-  swishSound.play()
-    .then(() => {
-      swishSound.pause();
-      swishSound.currentTime = 0;
-    })
-    .catch(err => {
-      console.warn('Audio unlock failed:', err);
-    });
-}
-
+// Modeling
 
 // Task 1
 // Create basketball court
@@ -371,34 +401,63 @@ function createBasketball() {
   basketball.add(seam5);
 
   basketball.position.set(0, initialBallPosition.y, 0);
-  // basketball.position.set(14, 50, 0); //uncomment to initiate above the rim
 
   scene.add(basketball);
   lastBallY = basketball.position.y;
   ballVelocity = new THREE.Vector3(0, 0, 0);
 }
 
-// Task 4
-function shootBall() {
-  // get camera forward direction
-  const dir = new THREE.Vector3();
-  camera.getWorldDirection(dir);
-  dir.y = 0;        
-  dir.normalize();
+// Actions
 
-  // set velocity: forward + upward component
-  ballVelocity.copy(dir.multiplyScalar(shotPower));
-  ballVelocity.y = shotPower * 0.7;  
+function nearestHoop(pos, eps = 0.2) {
+  const d0 = Math.hypot(pos.x - hoopPositions[0].x,
+                        pos.z - hoopPositions[0].z);
+  const d1 = Math.hypot(pos.x - hoopPositions[1].x,
+                        pos.z - hoopPositions[1].z);
+  if (Math.abs(d0 - d1) < eps) return Math.random() < 0.5 ? 0 : 1;
+  return d0 < d1 ? 0 : 1;
+}
 
-  // clear the power 
-  shotPower = 0;
+function shootBall() { 
+  const pos  = basketball.position;
+  const idx  = nearestHoop(pos);
+  const hoop = hoopPositions[idx];
+
+  const dx = hoop.x - pos.x;
+  const dz = hoop.z - pos.z;
+  let hDir = new THREE.Vector3(dx, 0, dz).normalize();
+  if (!autoTarget) {
+    camera.getWorldDirection(hDir);
+    hDir.y = 0;
+    hDir.normalize();
+  }
+  const dist = Math.hypot(dx, dz);
+
+  const k = THREE.MathUtils.clamp(
+              THREE.MathUtils.mapLinear(dist, 0, 15, 1.5, 0.6),
+              0.6, 1.5
+            );
+
+  const vh = shotPower / Math.sqrt(1 + k * k);
+  const vy = k * vh;
+
+  ballVelocity.copy(hDir.multiplyScalar(vh));
+  ballVelocity.y = vy;
+
+  const shotAngleRad = Math.atan(k);
+  statsDisplay.innerText = `Shots Made: ${shotsMade}\nShots Attempted: ${shotsAttempts}\nShooting percentage: ${shootingPercentage.toFixed(2)}%`;
 }
 
 function resetBall() {
   basketball.position.copy(initialBallPosition);
   ballVelocity.set(0, 0, 0);
   basketball.rotation.set(0, 0, 0);
+  shotPower = MAX_POWER * 0.5;
+  trailArray.fill(0);
+  trailGeo.attributes.position.needsUpdate = true;
 }
+
+// Collision Handling
 
 function handleRimCollision() {
   const rimY        = 3.05;      
@@ -447,17 +506,62 @@ function handleBackboardCollision() {
   });
 }
 
+function handlePoleCollision() {
+  const poleRadius = 0.075;
+  const poleHalfH  = 2.8 / 2;
+  const poleYs     = 1.4;
+  const poleXs     = [ 14.8, -14.8 ];
+
+  poleXs.forEach(px => {
+    const dx = basketball.position.x - px;
+    const dz = basketball.position.z - 0;
+    const horizDist = Math.hypot(dx, dz);
+
+    const dy = basketball.position.y - poleYs;
+    if (Math.abs(dy) > poleHalfH + BALL_RADIUS) return;
+
+    if (horizDist < poleRadius + BALL_RADIUS) {
+      const normal = new THREE.Vector3(dx, 0, dz).normalize();
+      const vAlong = normal.clone().multiplyScalar(ballVelocity.dot(normal));
+      ballVelocity.sub(vAlong.multiplyScalar(1 + RESTITUTION));
+
+      const penetration = poleRadius + BALL_RADIUS - horizDist;
+      basketball.position.addScaledVector(normal, penetration);
+    }
+  });
+}
+
+// Scoring system
+
+const swishSound = new Audio('src/swoosh.wav');
+
+function unlockAudio() {
+  swishSound.play()
+    .then(() => {
+      swishSound.pause();
+      swishSound.currentTime = 0;
+    })
+    .catch(err => {
+      console.warn('Audio unlock failed:', err);
+    });
+}
+window.addEventListener('keydown', unlockAudio, { once: true });
+window.addEventListener('mousedown', unlockAudio, { once: true });
+
 function checkScore() {
   const by = basketball.position.y;
-
   hoopPositions.forEach((hp, i) => {
     if (hoopArmed[i] && lastBallY > DETECT_Y && by <= DETECT_Y) {
       const dx = basketball.position.x - hp.x;
       const dz = basketball.position.z - hp.z;
-      if (Math.hypot(dx, dz) < RIM_RADIUS) { // if score
-        if (i === 0) homeScore++;
-        else           awayScore++;
+      if (Math.hypot(dx, dz) < RIM_RADIUS && shotInProgress) { // if score
+        shotsMade++;
+        shootingPercentage = (shotsMade / shotsAttempts) * 100;
+        statsDisplay.innerText = `Shots Made: ${shotsMade}\nShots Attempted: ${shotsAttempts}\nShooting percentage: ${shootingPercentage.toFixed(2)}%`;
+        if (i === 0) homeScore += 2;
+        else           awayScore += 2;
         
+        swishSound.pause();
         swishSound.currentTime = 0;
         swishSound.play();
         scoreDisplay.innerText = `${homeScore} - ${awayScore}`;
@@ -474,30 +578,16 @@ function checkScore() {
           scoreDisplay.style.color     = 'white';
         }, 200);
 
-        const popup = document.createElement('div');
-        popup.innerText = '+1';
-        Object.assign(popup.style, {
-          position:       'absolute',
-          top:            '20%',
-          left:           '50%',
-          transform:      'translate(-50%, -50%)',
-          color:          'blue',
-          fontSize:       '48px',
-          fontWeight:     'bold',
-          pointerEvents:  'none',
-          opacity:        '1',
-          transition:     'opacity 0.6s ease'
-        });
-        document.body.appendChild(popup);
-        
-        setTimeout(() => {
-          popup.style.opacity = '0';
-          setTimeout(() => document.body.removeChild(popup), 600);
-        }, 200);
-
+        flashMessage('SHOT MADE!', 'lime');
+        shotInProgress = false;
         hoopArmed[i] = false;
+      } 
+    } else if (shotInProgress) { 
+        if (by <= 0.4) {
+          flashMessage('SHOT MISSED', 'red');
+          shotInProgress = false;
+        }
       }
-    }
 
     if (!hoopArmed[i] && by > DETECT_Y + 0.2) {
       hoopArmed[i] = true;
@@ -543,11 +633,13 @@ instructionsElement.style.fontFamily = 'Arial, sans-serif';
 instructionsElement.style.textAlign = 'left';
 instructionsElement.innerHTML = `
   <h3>Controls:</h3>
-  <p>O - Toggle orbit camera</p>
   <p>Arrow keys - Move the ball</p>
-  <p>Hold space - Charge shot power</p>
-  <p>Release space - Shoot the ball</p>
+  <p>W - Increase shot power</p>
+  <p>S - Decrease shot power</p>
+  <p>Space - Shoot the ball</p>
+  <p>M - Toggle hoop auto-aim</p>
   <p>R - Reset ball position</p>
+  <p>O - Toggle orbit camera</p>
 `;
 document.body.appendChild(instructionsElement);
 
@@ -568,7 +660,6 @@ Object.assign(barContainer.style, {
   position:        'relative',
   width:           '5vw',
   height:          '100vh',
-  // border:          '2px solid white',
   background:      'rgba(0,0,0,0.2)',
   marginBottom:    '6px',
 });
@@ -611,6 +702,17 @@ scoreDisplay.style.pointerEvents = 'none';
 scoreDisplay.innerText = '0 - 0';
 document.body.appendChild(scoreDisplay);
 
+const statsDisplay = document.createElement('div');
+statsDisplay.style.transition = 'color 0.2s ease, transform 0.2s ease';
+statsDisplay.style.position      = 'absolute';
+statsDisplay.style.top           = '20px';
+statsDisplay.style.left          = '20px';
+statsDisplay.style.color         = 'white';
+statsDisplay.style.fontSize      = '16px';
+statsDisplay.style.fontFamily    = 'Arial, sans-serif';
+statsDisplay.style.pointerEvents = 'none';           
+statsDisplay.innerText = `Shots Made: ${shotsMade}\nShots Attempted: ${shotsAttempts}\nShooting percentage: ${shootingPercentage.toFixed(2)}%`;
+document.body.appendChild(statsDisplay);
 
 // Handle key events
 function handleKeyDown(e) {
@@ -624,21 +726,44 @@ document.addEventListener('keydown', handleKeyDown);
 // Animation function
 function animate() {
   requestAnimationFrame(animate);
-
+  
+  const minY = 0.4;
   const dt = clock.getDelta();
   ballVelocity.y += GRAVITY * dt; 
   basketball.position.addScaledVector(ballVelocity, dt);
-  const minY = 0.4;
   
   if (basketball.position.y < minY) {
     basketball.position.y = minY; 
-    ballVelocity.y = -ballVelocity.y * RESTITUTION; 
+    ballVelocity.y = -ballVelocity.y * RESTITUTION;
   }
-  
-  ballVelocity.x *= 0.99;
-  ballVelocity.z *= 0.99;
+  const grounded = basketball.position.y <= minY + 0.02; 
+
+  if (grounded) {         
+    ballVelocity.x *= 0.99;
+    ballVelocity.z *= 0.99;
+  }
+  // keep ball in court boundaries
+  if (basketball.position.x < COURT_MIN_X) {
+    basketball.position.x = COURT_MIN_X;
+    if (ballVelocity.x < 0) ballVelocity.x = -ballVelocity.x * RESTITUTION;
+  }
+  if (basketball.position.x > COURT_MAX_X) {
+    basketball.position.x = COURT_MAX_X;
+    if (ballVelocity.x > 0) ballVelocity.x = -ballVelocity.x * RESTITUTION;
+  }
+
+  if (basketball.position.z < COURT_MIN_Z) {
+    basketball.position.z = COURT_MIN_Z;
+    if (ballVelocity.z < 0) ballVelocity.z = -ballVelocity.z * RESTITUTION;
+  }
+  if (basketball.position.z > COURT_MAX_Z) {
+    basketball.position.z = COURT_MAX_Z;
+    if (ballVelocity.z > 0) ballVelocity.z = -ballVelocity.z * RESTITUTION;
+  }
+
   handleRimCollision();
   handleBackboardCollision();
+  handlePoleCollision()
   checkScore();
   
   // arrow key movement
@@ -646,9 +771,14 @@ function animate() {
   if (keys.ArrowDown)  ballVelocity.z += MOVE_ACCEL * dt;
   if (keys.ArrowLeft)  ballVelocity.x -= MOVE_ACCEL * dt;
   if (keys.ArrowRight) ballVelocity.x += MOVE_ACCEL * dt;
-  if (keys.Space) {
+  // power charge keys
+  if (keys.KeyW) {
     shotPower += CHARGE_RATE * dt;
     if (shotPower > MAX_POWER) shotPower = MAX_POWER;
+  }
+  if (keys.KeyS) {
+    shotPower -= CHARGE_RATE * dt;
+    if (shotPower < MIN_POWER) shotPower = MIN_POWER;
   }
 
   const hSpeed = Math.hypot(ballVelocity.x, ballVelocity.z);
@@ -676,7 +806,7 @@ function animate() {
     ).normalize();
 
     const angle = dist / BALL_RADIUS;
-    basketball.rotateOnAxis(axis, angle);
+    basketball.rotateOnWorldAxis(axis, angle);
   }
   // Update controls
   controls.enabled = isOrbitEnabled;
